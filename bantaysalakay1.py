@@ -442,6 +442,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200) 
         self.send_header('Content-type', 'text/plain') 
         self.end_headers() 
+        
     def log_message(self, format, *args): return 
 
 def run_web_server(): 
