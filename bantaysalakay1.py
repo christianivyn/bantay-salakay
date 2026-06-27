@@ -306,6 +306,7 @@ async def on_ready():
 
 
 # --- KEEP-ALIVE WEB SERVER ROUTINE ---
+# --- KEEP-ALIVE WEB SERVER ROUTINE ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -313,15 +314,14 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bantay Salakay is online!")
 
+    # 🟢 ADD THIS FUNCTION TO FIX THE UPTIMEROBOT 404 ERROR:
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+
     def log_message(self, format, *args):
         return  # Suppress default logs to keep your terminal console clean
-
-def run_web_server():
-    server = HTTPServer(('0.0.0.0', 10000), KeepAliveHandler)
-    server.serve_forever()
-
-# Spin up the web server on a background thread BEFORE running the blocking bot initialization
-threading.Thread(target=run_web_server, daemon=True).start()
 
 # Launch Bot
 bot.run(TOKEN)
