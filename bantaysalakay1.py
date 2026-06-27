@@ -1,21 +1,18 @@
 import csv
 import os
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord import app_commands
 from discord.ext import commands
-import os
 from dotenv import load_dotenv
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Load variables from the hidden local .env file
 load_dotenv()
 
 # --- CONFIGURATION (SECURED) ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-
-# Environmental values are read as strings, so we wrap IDs in int()
 ROLE_ID = int(os.getenv("ROLE_ID"))
 LURKER_ROLE_ID = int(os.getenv("LURKER_ROLE_ID"))
 CATEGORY_ID = int(os.getenv("CATEGORY_ID"))
@@ -57,14 +54,12 @@ def get_all_verified_entries() -> list[str]:
         for row in reader:
             if row.get('discord_id') and row['discord_id'].strip():
                 raw_num = row.get('student_number', '').strip()
-                raw_name = row.get('name', '').strip().upper()  # 🔄 Grab whole name in uppercase
+                raw_name = row.get('name', '').strip().upper()
                 
                 if raw_num and raw_name:
                     five_digit = clean_student_number(raw_num)
-                    # Formats exactly with the entire full name layout: [ AQUINO, FRANCIS CLARK V. ] [ 00628 ]
                     entries.append((raw_name, f"🟢 `[ {raw_name} ]` `[ {five_digit} ]` VERIFIED"))
                     
-    # Sort alphabetically by full name A-Z
     entries.sort(key=lambda x: x[0])
     return [line[1] for line in entries]
 
@@ -162,7 +157,7 @@ class PersistentPanel(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="🎫 CPE CPE CPE 1-1", 
+        label="🎫 Verify Identity", 
         style=discord.ButtonStyle.danger, 
         custom_id="start_verification_btn"
     )
@@ -176,7 +171,7 @@ class PersistentPanel(discord.ui.View):
             return
 
         classmate_role = guild.get_role(ROLE_ID)
-        if classmate_role in member.roles:
+        if classmate_role and classmate_role in member.roles:
             await interaction.response.send_message("⚠️ You are already verified as a classmate!", ephemeral=True)
             return
 
@@ -205,7 +200,8 @@ class PersistentPanel(discord.ui.View):
             ),
             color=discord.Color.from_rgb(231, 76, 60)
         )
-        embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
+        if bot.user.display_avatar:
+            embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
         
         await ticket_channel.send(embed=embed, content=member.mention)
         await interaction.response.send_message(f"✅ Private verification portal opened: {ticket_channel.mention}", ephemeral=True)
@@ -287,7 +283,8 @@ async def setup_panel(ctx):
         description="Welcome to the official section workspace! Click the button below to open a private ticket and confirm your student ID roster information.",
         color=discord.Color.from_rgb(231, 76, 60) 
     )
-    embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
+    if bot.user.display_avatar:
+        embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed, view=PersistentPanel())
     try:
         await ctx.message.delete()
@@ -307,10 +304,8 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Error during startup: {e}")
 
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Create a tiny web server class to handle Render's web checks
+# --- KEEP-ALIVE WEB SERVER ROUTINE ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -322,12 +317,11 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         return  # Suppress default logs to keep your terminal console clean
 
 def run_web_server():
-    # Render routes incoming free web service traffic to port 10000 by default
     server = HTTPServer(('0.0.0.0', 10000), KeepAliveHandler)
     server.serve_forever()
 
-# Spin up the web server on a background thread so it doesn't block your Discord bot
+# Spin up the web server on a background thread BEFORE running the blocking bot initialization
 threading.Thread(target=run_web_server, daemon=True).start()
 
+# Launch Bot
 bot.run(TOKEN)
-
