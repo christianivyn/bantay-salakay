@@ -156,60 +156,67 @@ async def channel_lifespan_timer(channel_id: int):
     except Exception as e:
         print(f"⚠️ Error during channel auto-delete: {e}")
 
-# --- TICKET UI PANELS ---
-class PersistentPanel(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+# --- TICKET UI PANELS --- 
+class PersistentPanel(discord.ui.View): 
+    def __init__(self): 
+        super().__init__(timeout=None) 
 
-    @discord.ui.button(
-        label="🎫 Verify Identity", 
-        style=discord.ButtonStyle.danger, 
-        custom_id="start_verification_btn"
-    )
-    async def start_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        member = interaction.user
-        category = guild.get_channel(CATEGORY_ID)
-        
-        if not category or not isinstance(category, discord.CategoryChannel):
-            await interaction.response.send_message("❌ Configuration Error: Category not found.", ephemeral=True)
-            return
+    @discord.ui.button( 
+        label="🎫 Verify Identity",  
+        style=discord.ButtonStyle.danger,  
+        custom_id="start_verification_btn" 
+    ) 
+    async def start_verification(self, interaction: discord.Interaction, button: discord.ui.Button): 
+        # 1. 🟢 IMMEDIATELY DEFER to buy 15 minutes of execution time
+        await interaction.response.defer(ephemeral=True)
 
-        classmate_role = guild.get_role(ROLE_ID)
-        if classmate_role and classmate_role in member.roles:
-            await interaction.response.send_message("⚠️ You are already verified as a classmate!", ephemeral=True)
-            return
+        guild = interaction.guild 
+        member = interaction.user 
+        category = guild.get_channel(CATEGORY_ID) 
+         
+        if not category or not isinstance(category, discord.CategoryChannel): 
+            # 🔄 Switch to followup.send since we deferred
+            await interaction.followup.send("❌ Configuration Error: Category not found.", ephemeral=True) 
+            return 
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
-        }
+        classmate_role = guild.get_role(ROLE_ID) 
+        if classmate_role and classmate_role in member.roles: 
+            # 🔄 Switch to followup.send since we deferred
+            await interaction.followup.send("⚠️ You are already verified as a classmate!", ephemeral=True) 
+            return 
 
-        ticket_channel = await guild.create_text_channel(
-            name=f"verify-{member.name}",
-            category=category,
-            overwrites=overwrites,
-            topic=f"Classmate verification portal for {member.id}"
-        )
+        overwrites = { 
+            guild.default_role: discord.PermissionOverwrite(view_channel=False), 
+            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True), 
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True) 
+        } 
 
-        embed = discord.Embed(
-            title="🏫 CPE 1-1 Verification Portal",
-            description=(
-                f"Welcome {member.mention}!\n\n"
-                "To gain access to our class section workspace, use the slash command below:\n"
-                "➡️ `/verify [your_student_number]`\n\n"
-                "⚠️ **Important Rules:**\n"
-                "* This channel will automatically close in **3 minutes** if unverified.\n"
-                "* Entering an invalid student number **3 times** will auto-delete this terminal."
-            ),
-            color=discord.Color.from_rgb(231, 76, 60)
-        )
-        if bot.user.display_avatar:
-            embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
-        
-        await ticket_channel.send(embed=embed, content=member.mention)
-        await interaction.response.send_message(f"✅ Private verification portal opened: {ticket_channel.mention}", ephemeral=True)
+        ticket_channel = await guild.create_text_channel( 
+            name=f"verify-{member.name}", 
+            category=category, 
+            overwrites=overwrites, 
+            topic=f"Classmate verification portal for {member.id}" 
+        ) 
+
+        embed = discord.Embed( 
+            title="🏫 CPE 1-1 Verification Portal", 
+            description=( 
+                f"Welcome {member.mention}!\n\n" 
+                "To gain access to our class section workspace, use the slash command below:\n" 
+                "➡️ `/verify [your_student_number]`\n\n" 
+                "⚠️ **Important Rules:**\n" 
+                "* This channel will automatically close in **3 minutes** if unverified.\n" 
+                "* Entering an invalid student number **3 times** will auto-delete this terminal." 
+            ), 
+            color=discord.Color.from_rgb(231, 76, 60) 
+        ) 
+        if bot.user.display_avatar: 
+            embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url) 
+
+        await ticket_channel.send(embed=embed, content=member.mention) 
+
+        # 2. 🟢 CHANGE THIS line to follow up on the deferred token
+        await interaction.followup.send(f"✅ Private verification portal opened: {ticket_channel.mention}", ephemeral=True) 
         
         bot.loop.create_task(channel_lifespan_timer(ticket_channel.id))
 
