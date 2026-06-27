@@ -1,6 +1,4 @@
-# Ignore the masterlist data spreadsheet
+.env
 students.csv
 *.xlsx
-
-# Ignore environment variables / tokens
-.env
+__pycache__/

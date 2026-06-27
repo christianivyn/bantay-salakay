@@ -6,6 +6,8 @@ from discord import app_commands
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Load variables from the hidden local .env file
 load_dotenv()
