@@ -1,0 +1,6 @@
+# Ignore the masterlist data spreadsheet
+students.csv
+*.xlsx
+
+# Ignore environment variables / tokens
+.env
