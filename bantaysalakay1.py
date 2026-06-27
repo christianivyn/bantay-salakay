@@ -30,8 +30,13 @@ class VerificationBot(commands.Bot):
         self.attempts_tracker = {}
         
     async def setup_hook(self):
+        # 1. Register your persistent buttons view
         self.add_view(PersistentPanel())
         print("🔒 Persistent View Registered")
+        
+        # 2. Spin up the keep-alive web server safely right here
+        print("🌐 Starting background keep-alive web server...")
+        threading.Thread(target=run_web_server, daemon=True).start()
 
 bot = VerificationBot()
 
@@ -306,7 +311,6 @@ async def on_ready():
 
 
 # --- KEEP-ALIVE WEB SERVER ROUTINE ---
-# --- KEEP-ALIVE WEB SERVER ROUTINE ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -314,7 +318,6 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bantay Salakay is online!")
 
-    # 🟢 ADD THIS FUNCTION TO FIX THE UPTIMEROBOT 404 ERROR:
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -323,5 +326,10 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return  # Suppress default logs to keep your terminal console clean
 
-# Launch Bot
+def run_web_server():
+    server = HTTPServer(('0.0.0.0', 10000), KeepAliveHandler)
+    server.serve_forever()
+
+
+# Launch Bot (The threading launch has moved inside setup_hook above!)
 bot.run(TOKEN)
