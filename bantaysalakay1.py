@@ -5,7 +5,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks  # 🟢 Added tasks extension for the background loop
 from dotenv import load_dotenv
 
 # Load variables from the hidden local .env file
@@ -43,8 +43,22 @@ class VerificationBot(commands.Bot):
         except Exception as e:
             print(f"❌ Failed to sync command tree: {e}")
         
+        # 🟢 Start the 3-minute background update loop automatically
+        self.auto_roster_updater.start()
+        print("⏰ 3-Minute Background Roster Updater Loop Active")
+        
         print("🌐 Starting background keep-alive web server...")
         threading.Thread(target=run_web_server, daemon=True).start()
+
+    # 🟢 NEW: Automated 3-minute background updater task loop
+    @tasks.loop(minutes=3.0)
+    async def auto_roster_updater(self):
+        """Background routine that auto-refreshes the log channel roster status every 3 minutes"""
+        await self.wait_until_ready()
+        try:
+            await update_verification_log_board()
+        except Exception as e:
+            print(f"❌ Background roster auto-sync failed: {e}")
 
 bot = VerificationBot()
 
@@ -62,7 +76,7 @@ def get_all_verified_entries() -> list[str]:
     with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            cleaned_row = {k.strip(): v for k, v in row.items() if k}
+            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
             if (cleaned_row.get('discord_id') and cleaned_row['discord_id'].strip()) or \
                (cleaned_row.get('alt_id_1') and cleaned_row['alt_id_1'].strip()) or \
                (cleaned_row.get('alt_id_2') and cleaned_row['alt_id_2'].strip()):
@@ -87,7 +101,8 @@ def check_and_verify_student(student_num: str, discord_id: str) -> tuple[str, st
     rows = []
     found = False
     status = "not_found"
-    final_five_digit = clean_student_number(student_num)
+    user_five_digit = clean_student_number(student_num)
+    final_five_digit = user_five_digit
     final_name = "STUDENT"
     
     with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
@@ -104,9 +119,11 @@ def check_and_verify_student(student_num: str, discord_id: str) -> tuple[str, st
             cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
             
             csv_num = cleaned_row.get('student_number', '').strip()
-            if csv_num == student_num.strip():
+            csv_five_digit = clean_student_number(csv_num)
+            
+            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
                 found = True
-                final_five_digit = clean_student_number(csv_num)
+                final_five_digit = csv_five_digit
                 final_name = cleaned_row.get('name', '').strip().upper()
                 
                 if cleaned_row.get('discord_id') and cleaned_row['discord_id'].strip():
@@ -133,7 +150,8 @@ def process_dummy_login(student_num: str, provided_pass: str, discord_id: str) -
     rows = []
     status = "not_found"
     msg = "Student number not found."
-    final_five_digit = clean_student_number(student_num)
+    user_five_digit = clean_student_number(student_num)
+    final_five_digit = user_five_digit
     
     with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
@@ -149,7 +167,10 @@ def process_dummy_login(student_num: str, provided_pass: str, discord_id: str) -
             cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
 
             csv_num = cleaned_row.get('student_number', '').strip()
-            if csv_num == student_num.strip():
+            csv_five_digit = clean_student_number(csv_num)
+
+            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
+                final_five_digit = csv_five_digit
                 stored_pass = cleaned_row.get('password', '').strip()
                 if not stored_pass:
                     stored_pass = f"cpe-{final_five_digit}"
@@ -163,7 +184,6 @@ def process_dummy_login(student_num: str, provided_pass: str, discord_id: str) -
                 
                 str_id = str(discord_id)
                 
-                # 🔒 FIXED MULTI-SLOT BLOCKER: Rejects if THIS exact account already occupies ANY slot under this profile
                 if cleaned_row.get('discord_id') == str_id or \
                    cleaned_row.get('alt_id_1') == str_id or \
                    cleaned_row.get('alt_id_2') == str_id:
@@ -173,7 +193,6 @@ def process_dummy_login(student_num: str, provided_pass: str, discord_id: str) -
                     rows.append(out_row)
                     continue
 
-                # Slot checking matrix logic
                 if not cleaned_row.get('alt_id_1') or not cleaned_row['alt_id_1'].strip():
                     cleaned_row['alt_id_1'] = str_id
                     status = "success"
@@ -202,7 +221,7 @@ def process_self_reset(student_num: str, discord_id: str) -> tuple[bool, str]:
     rows = []
     success = False
     error_msg = "Student record not found or your Discord ID doesn't match the primary slot."
-    final_five_digit = clean_student_number(student_num)
+    user_five_digit = clean_student_number(student_num)
 
     with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
@@ -211,9 +230,12 @@ def process_self_reset(student_num: str, discord_id: str) -> tuple[bool, str]:
 
         for row in reader:
             cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-            if cleaned_row.get('student_number', '').strip() == student_num.strip():
+            csv_num = cleaned_row.get('student_number', '').strip()
+            csv_five_digit = clean_student_number(csv_num)
+
+            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
                 if cleaned_row.get('discord_id', '').strip() == str(discord_id):
-                    cleaned_row['password'] = f"cpe-{final_five_digit}"
+                    cleaned_row['password'] = f"cpe-{csv_five_digit}"
                     success = True
                 else:
                     error_msg = "Security block: Only the primary verified Discord holder can trigger an auto-reset modal."
@@ -226,7 +248,7 @@ def process_self_reset(student_num: str, discord_id: str) -> tuple[bool, str]:
             writer = csv.DictWriter(f, fieldnames=raw_fields)
             writer.writeheader()
             writer.writerows(rows)
-        return True, f"cpe-{final_five_digit}"
+        return True, f"cpe-{user_five_digit}"
     return False, error_msg
 
 def process_interactive_change(discord_id: str, old_pass: str, new_pass: str) -> tuple[bool, str]:
@@ -367,7 +389,6 @@ class LoginModal(discord.ui.Modal, title="🔓 Login Alternate Account"):
         if res in ["not_found", "wrong_password"]:
             await handle_strike_count(interaction)
         elif res in ["max_slots", "already_linked"]:
-            # Returns custom full limit bounds or duplication errors seamlessly
             await interaction.followup.send(f"❌ {message}", ephemeral=True)
         elif res == "success":
             role = interaction.guild.get_role(ROLE_ID)
