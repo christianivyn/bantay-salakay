@@ -428,7 +428,7 @@ class PersistentPanel(discord.ui.View):
         guild = interaction.guild 
         member = interaction.user 
         category = guild.get_channel(CATEGORY_ID) 
-         
+        
         if not category or not isinstance(category, discord.CategoryChannel): 
             await interaction.followup.send("❌ Setup configuration mapping mismatch.", ephemeral=True) 
             return 
@@ -447,28 +447,16 @@ class PersistentPanel(discord.ui.View):
             title="🏫 CPE 1-1 Onboarding Gate", 
             description=( 
                 f"Welcome {member.mention}!\n\n" 
-                "**Primary Account Verification:**\n"
-                "➡️ Click **📝 Verify Roster Profile** to register your main account.\n\n"
-                "**Alternate / Dummy Account Links:**\n"
-                "➡️ Click **🔓 Link Alternate Account** to connect a secondary profile.\n\n"
+                "Click **Verify Roster Profile** if this is your primary account.\n"
+                "Click **Link Alternate Account** if you are linking a secondary dummy account.\n\n"
                 "⚠️ *This ticket channel automatically self-destructs after **3 minutes** or after **3 failed verification strikes**.*"
             ), 
             color=discord.Color.from_rgb(231, 76, 60) 
         ) 
-        
-        # 🟢 Send the primary verification buttons first
+        # 🟢 Only sends the onboarding views cleanly
         await ticket_channel.send(embed=embed, content=member.mention, view=TicketActionView()) 
-        
-        # 🟢 IMMEDIATELY SEND THE ACCOUNT MANAGEMENT TOOLS INSIDE THE SAME TICKET ROOM!
-        management_embed = discord.Embed(
-            title="🔐 Profile Credential Management Menu",
-            description="If you are configuring or resetting an existing profile structure, utilize the options below:",
-            color=discord.Color.orange()
-        )
-        await ticket_channel.send(embed=management_embed, view=ForgotPassActionView())
-
         await interaction.followup.send(f"✅ Onboarding entry gate open: {ticket_channel.mention}", ephemeral=True) 
-        bot.loop.create_task(channel_lifespan_timer(ticket_channel.id)) 
+        bot.loop.create_task(channel_lifespan_timer(ticket_channel.id))
 
     # 🔄 You can safely leave this here or remove it if you don't want a separate button on the main panel anymore!
     @discord.ui.button(label="⚙️ Manage Account / Password", style=discord.ButtonStyle.secondary, custom_id="forgot_password_btn")
