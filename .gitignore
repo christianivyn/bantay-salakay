@@ -6,4 +6,6 @@ students copy.csv
 bantaysalakay_original.py
 bantaysalakay.py
 migrate_to_sql.py
+test_swap.py
+test_revert.py
 
