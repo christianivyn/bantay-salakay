@@ -1,14 +1,15 @@
-import csv
 import os
 import asyncio
 import threading
+import psycopg2
+from psycopg2.extras import DictCursor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks  # 🟢 Added tasks extension for the background loop
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-# Load variables from the hidden local .env file
+# Load variables from the local environment
 load_dotenv()
 
 # --- CONFIGURATION (SECURED) ---
@@ -17,8 +18,7 @@ ROLE_ID = int(os.getenv("ROLE_ID"))
 LURKER_ROLE_ID = int(os.getenv("LURKER_ROLE_ID"))
 CATEGORY_ID = int(os.getenv("CATEGORY_ID"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
-
-CSV_FILE = "students.csv"
+DATABASE_URL = os.getenv("DATABASE_URL")  # 🟢 New Cloud Database URL
 
 intents = discord.Intents.default()
 intents.members = True
@@ -30,6 +30,9 @@ class VerificationBot(commands.Bot):
         self.attempts_tracker = {}  # Tracks failure strikes per channel ID
         
     async def setup_hook(self):
+        # Initialize SQL Database Tables Schema
+        init_db_schema()
+        
         self.add_view(PersistentPanel())
         self.add_view(AdminTicketView())
         self.add_view(TicketActionView())
@@ -43,17 +46,14 @@ class VerificationBot(commands.Bot):
         except Exception as e:
             print(f"❌ Failed to sync command tree: {e}")
         
-        # 🟢 Start the 3-minute background update loop automatically
         self.auto_roster_updater.start()
         print("⏰ 3-Minute Background Roster Updater Loop Active")
         
         print("🌐 Starting background keep-alive web server...")
         threading.Thread(target=run_web_server, daemon=True).start()
 
-    # 🟢 NEW: Automated 3-minute background updater task loop
     @tasks.loop(minutes=3.0)
     async def auto_roster_updater(self):
-        """Background routine that auto-refreshes the log channel roster status every 3 minutes"""
         await self.wait_until_ready()
         try:
             await update_verification_log_board()
@@ -62,7 +62,30 @@ class VerificationBot(commands.Bot):
 
 bot = VerificationBot()
 
-# --- BACKEND LOGIC ---
+# --- SQL DATABASE COMPONENT ENGINE ---
+def get_db_connection():
+    """Establishes an active reference connection pool handle directly to cloud SQL"""
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def init_db_schema():
+    """Initializes and builds the target database table matrix schema layer if missing"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            name TEXT NOT NULL,
+            student_number TEXT PRIMARY KEY,
+            discord_id VARCHAR(32),
+            alt_id_1 VARCHAR(32),
+            alt_id_2 VARCHAR(32),
+            password TEXT
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("🐘 Cloud Postgres Database Synced and Verified.")
+
 def clean_student_number(student_num: str) -> str:
     parts = student_num.strip().split('-')
     if len(parts) >= 2:
@@ -70,221 +93,163 @@ def clean_student_number(student_num: str) -> str:
     return student_num.strip()[-5:] 
 
 def get_all_verified_entries() -> list[str]:
-    if not os.path.exists(CSV_FILE):
-        return []
     entries = []
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-            if (cleaned_row.get('discord_id') and cleaned_row['discord_id'].strip()) or \
-               (cleaned_row.get('alt_id_1') and cleaned_row['alt_id_1'].strip()) or \
-               (cleaned_row.get('alt_id_2') and cleaned_row['alt_id_2'].strip()):
-                
-                raw_num = cleaned_row.get('student_number', '').strip()
-                raw_name = cleaned_row.get('name', '').strip().upper()
-                
-                if raw_num and raw_name:
-                    five_digit = clean_student_number(raw_num)
-                    if len(five_digit) >= 2:
-                        censored_digits = five_digit[:-2] + "XX"
-                    else:
-                        censored_digits = "XX"
-                    entries.append((raw_name, f"🟢 `[ {raw_name} ]` `[ {censored_digits} ]` ACTIVE"))
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    # Query all students who have any account linked
+    cur.execute("""
+        SELECT name, student_number FROM students 
+        WHERE (discord_id IS NOT NULL AND discord_id != '')
+           OR (alt_id_1 IS NOT NULL AND alt_id_1 != '')
+           OR (alt_id_2 IS NOT NULL AND alt_id_2 != '')
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    for row in rows:
+        raw_num = row['student_number'].strip()
+        raw_name = row['name'].strip().upper()
+        
+        five_digit = clean_student_number(raw_num)
+        if len(five_digit) >= 2:
+            censored_digits = five_digit[:-2] + "XX"
+        else:
+            censored_digits = "XX"
+        entries.append((raw_name, f"🟢 `[ {raw_name} ]` `[ {censored_digits} ]` ACTIVE"))
+        
     entries.sort(key=lambda x: x[0])
     return [line[1] for line in entries]
 
 def check_and_verify_student(student_num: str, discord_id: str) -> tuple[str, str, str]:
-    if not os.path.exists(CSV_FILE):
-        return "not_found", "", ""
-
-    rows = []
-    found = False
-    status = "not_found"
     user_five_digit = clean_student_number(student_num)
-    final_five_digit = user_five_digit
-    final_name = "STUDENT"
     
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        raw_fields = list(reader.fieldnames) if reader.fieldnames else []
-        field_map = {f.replace('\ufeff', '').strip(): f for f in raw_fields}
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    # Check for match via full number or short sub-chunk digits
+    cur.execute("SELECT * FROM students WHERE student_number = %s OR student_number LIKE %s", 
+                (student_num.strip(), f"%{user_five_digit}%"))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return "not_found", user_five_digit, "STUDENT"
         
-        for col in ['name', 'student_number', 'discord_id', 'alt_id_1', 'alt_id_2', 'password']:
-            if col not in field_map:
-                field_map[col] = col
-                raw_fields.append(col)
-
-        for row in reader:
-            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-            
-            csv_num = cleaned_row.get('student_number', '').strip()
-            csv_five_digit = clean_student_number(csv_num)
-            
-            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
-                found = True
-                final_five_digit = csv_five_digit
-                final_name = cleaned_row.get('name', '').strip().upper()
-                
-                if cleaned_row.get('discord_id') and cleaned_row['discord_id'].strip():
-                    status = "already_verified"
-                else:
-                    cleaned_row['discord_id'] = str(discord_id)
-                    cleaned_row['password'] = f"cpe-{final_five_digit}"
-                    status = "success"
-            
-            out_row = {original_header: cleaned_row.get(target_clean, '') for target_clean, original_header in field_map.items()}
-            rows.append(out_row)
-            
-    if found and status == "success":
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=raw_fields)
-            writer.writeheader()
-            writer.writerows(rows)
-            
-    return status, final_five_digit, final_name
+    db_num = row['student_number']
+    final_five_digit = clean_student_number(db_num)
+    final_name = row['name'].strip().upper()
+    
+    if row['discord_id'] and row['discord_id'].strip():
+        cur.close()
+        conn.close()
+        return "already_verified", final_five_digit, final_name
+        
+    # Bind user info cleanly
+    default_pass = f"cpe-{final_five_digit}"
+    cur.execute("UPDATE students SET discord_id = %s, password = %s WHERE student_number = %s",
+                (str(discord_id), default_pass, db_num))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return "success", final_five_digit, final_name
 
 def process_dummy_login(student_num: str, provided_pass: str, discord_id: str) -> tuple[str, str]:
-    if not os.path.exists(CSV_FILE): return "not_found", "Database missing."
-
-    rows = []
-    status = "not_found"
-    msg = "Student number not found."
     user_five_digit = clean_student_number(student_num)
-    final_five_digit = user_five_digit
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
     
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        raw_fields = list(reader.fieldnames) if reader.fieldnames else []
-        field_map = {f.replace('\ufeff', '').strip(): f for f in raw_fields}
+    cur.execute("SELECT * FROM students WHERE student_number = %s OR student_number LIKE %s", 
+                (student_num.strip(), f"%{user_five_digit}%"))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return "not_found", "Student number not found."
         
-        for col in ['name', 'student_number', 'discord_id', 'alt_id_1', 'alt_id_2', 'password']:
-            if col not in field_map:
-                field_map[col] = col
-                raw_fields.append(col)
+    db_num = row['student_number']
+    final_five_digit = clean_student_number(db_num)
+    stored_pass = row['password'].strip() if row['password'] else f"cpe-{final_five_digit}"
+    
+    if stored_pass != provided_pass.strip():
+        cur.close()
+        conn.close()
+        return "wrong_password", "Invalid password credential provided."
         
-        for row in reader:
-            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-
-            csv_num = cleaned_row.get('student_number', '').strip()
-            csv_five_digit = clean_student_number(csv_num)
-
-            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
-                final_five_digit = csv_five_digit
-                stored_pass = cleaned_row.get('password', '').strip()
-                if not stored_pass:
-                    stored_pass = f"cpe-{final_five_digit}"
-                
-                if stored_pass != provided_pass.strip():
-                    status = "wrong_password"
-                    msg = "Invalid password credential provided."
-                    out_row = {field_map[k]: v for k, v in cleaned_row.items()}
-                    rows.append(out_row)
-                    continue
-                
-                str_id = str(discord_id)
-                
-                if cleaned_row.get('discord_id') == str_id or \
-                   cleaned_row.get('alt_id_1') == str_id or \
-                   cleaned_row.get('alt_id_2') == str_id:
-                    status = "already_linked"
-                    msg = "Account already registered! This specific Discord account is already active somewhere on this student profile."
-                    out_row = {field_map[k]: v for k, v in cleaned_row.items()}
-                    rows.append(out_row)
-                    continue
-
-                if not cleaned_row.get('alt_id_1') or not cleaned_row['alt_id_1'].strip():
-                    cleaned_row['alt_id_1'] = str_id
-                    status = "success"
-                    msg = "You've successfully entered the Valhalla!"
-                elif not cleaned_row.get('alt_id_2') or not cleaned_row['alt_id_2'].strip():
-                    cleaned_row['alt_id_2'] = str_id
-                    status = "success"
-                    msg = "You've successfully entered the Valhalla!"
-                else:
-                    status = "max_slots"
-                    msg = "If full, you've reached the threshold of alt accounts, young one."
-            
-            out_row = {original_header: cleaned_row.get(target_clean, '') for target_clean, original_header in field_map.items()}
-            rows.append(out_row)
-
-    if status == "success":
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=raw_fields)
-            writer.writeheader()
-            writer.writerows(rows)
-
+    str_id = str(discord_id)
+    if row['discord_id'] == str_id or row['alt_id_1'] == str_id or row['alt_id_2'] == str_id:
+        cur.close()
+        conn.close()
+        return "already_linked", "Account already registered! This specific Discord account is already active somewhere on this student profile."
+        
+    if not row['alt_id_1'] or not row['alt_id_1'].strip():
+        cur.execute("UPDATE students SET alt_id_1 = %s WHERE student_number = %s", (str_id, db_num))
+        status, msg = "success", "You've successfully entered the Valhalla!"
+    elif not row['alt_id_2'] or not row['alt_id_2'].strip():
+        cur.execute("UPDATE students SET alt_id_2 = %s WHERE student_number = %s", (str_id, db_num))
+        status, msg = "success", "You've successfully entered the Valhalla!"
+    else:
+        status, msg = "max_slots", "If full, you've reached the threshold of alt accounts, young one."
+        
+    conn.commit()
+    cur.close()
+    conn.close()
     return status, msg
 
 def process_self_reset(student_num: str, discord_id: str) -> tuple[bool, str]:
-    if not os.path.exists(CSV_FILE): return False, "Database reference matrix missing."
-    rows = []
-    success = False
-    error_msg = "Student record not found or your Discord ID doesn't match the primary slot."
     user_five_digit = clean_student_number(student_num)
-
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        raw_fields = list(reader.fieldnames) if reader.fieldnames else []
-        field_map = {f.replace('\ufeff', '').strip(): f for f in raw_fields}
-
-        for row in reader:
-            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-            csv_num = cleaned_row.get('student_number', '').strip()
-            csv_five_digit = clean_student_number(csv_num)
-
-            if csv_num == student_num.strip() or csv_five_digit == user_five_digit:
-                if cleaned_row.get('discord_id', '').strip() == str(discord_id):
-                    cleaned_row['password'] = f"cpe-{csv_five_digit}"
-                    success = True
-                else:
-                    error_msg = "Security block: Only the primary verified Discord holder can trigger an auto-reset modal."
-            
-            out_row = {original_header: cleaned_row.get(target_clean, '') for target_clean, original_header in field_map.items()}
-            rows.append(out_row)
-
-    if success:
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=raw_fields)
-            writer.writeheader()
-            writer.writerows(rows)
-        return True, f"cpe-{user_five_digit}"
-    return False, error_msg
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    cur.execute("SELECT * FROM students WHERE student_number = %s OR student_number LIKE %s", 
+                (student_num.strip(), f"%{user_five_digit}%"))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return False, "Student record not found or your Discord ID doesn't match the primary slot."
+        
+    db_num = row['student_number']
+    final_five_digit = clean_student_number(db_num)
+    
+    if row['discord_id'] != str(discord_id):
+        cur.close()
+        conn.close()
+        return False, "Security block: Only the primary verified Discord holder can trigger an auto-reset modal."
+        
+    cur.execute("UPDATE students SET password = %s WHERE student_number = %s", (f"cpe-{final_five_digit}", db_num))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True, f"cpe-{final_five_digit}"
 
 def process_interactive_change(discord_id: str, old_pass: str, new_pass: str) -> tuple[bool, str]:
-    if not os.path.exists(CSV_FILE): return False, "Database roster file missing."
-    rows = []
-    updated = False
-    error_msg = "Your account is not verified as the primary holder of any profile."
-
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        raw_fields = list(reader.fieldnames) if reader.fieldnames else []
-        field_map = {f.replace('\ufeff', '').strip(): f for f in raw_fields}
-
-        for row in reader:
-            cleaned_row = {k.replace('\ufeff', '').strip(): v for k, v in row.items() if k}
-            if cleaned_row.get('discord_id', '').strip() == str(discord_id):
-                stored_pass = cleaned_row.get('password', '').strip()
-                if not stored_pass:
-                    stored_pass = f"cpe-{clean_student_number(cleaned_row.get('student_number', ''))}"
-                
-                if stored_pass == old_pass.strip():
-                    cleaned_row['password'] = new_pass.strip()
-                    updated = True
-                else:
-                    error_msg = "Invalid current password credential provided."
-            
-            out_row = {original_header: cleaned_row.get(target_clean, '') for target_clean, original_header in field_map.items()}
-            rows.append(out_row)
-
-    if updated:
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=raw_fields)
-            writer.writeheader()
-            writer.writerows(rows)
-        return True, "Success"
-    return False, error_msg
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    cur.execute("SELECT * FROM students WHERE discord_id = %s", (str(discord_id),))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return False, "Your account is not verified as the primary holder of any profile."
+        
+    stored_pass = row['password'].strip() if row['password'] else f"cpe-{clean_student_number(row['student_number'])}"
+    if stored_pass != old_pass.strip():
+        cur.close()
+        conn.close()
+        return False, "Invalid current password credential provided."
+        
+    cur.execute("UPDATE students SET password = %s WHERE discord_id = %s", (new_pass.strip(), str(discord_id)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True, "Success"
 
 async def prune_old_user_tickets(guild: discord.Guild, member: discord.Member):
     category = guild.get_channel(CATEGORY_ID)
@@ -293,10 +258,8 @@ async def prune_old_user_tickets(guild: discord.Guild, member: discord.Member):
     target_prefixes = (f"verify-{member.name.lower()}", f"forgot-pass-{member.name.lower()}")
     for channel in category.text_channels:
         if channel.name.lower().startswith(target_prefixes):
-            try:
-                await channel.delete(reason="Pruned old overlapping ticket to enforce single concurrent channel policy.")
-            except:
-                pass
+            try: await channel.delete(reason="Pruned old ticket to enforce single concurrent channel policy.")
+            except: pass
 
 async def handle_strike_count(interaction: discord.Interaction):
     channel_id = interaction.channel.id
@@ -598,83 +561,45 @@ async def login(interaction: discord.Interaction, student_number: str, password:
 @app_commands.describe(old_password="Your current password", new_password="Your new secure password")
 async def change_password(interaction: discord.Interaction, old_password: str, new_password: str):
     await interaction.response.defer(ephemeral=True)
-    member = interaction.user
-    
-    if not os.path.exists(CSV_FILE):
-        await interaction.followup.send("❌ Error: Roster database not found.", ephemeral=True)
-        return
-
-    rows = []
-    updated = False
-    error_msg = "Your current Discord account is not verified as the primary holder of any profile."
-
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames)
-        
-        for row in reader:
-            str_id = str(member.id)
-            if row.get('discord_id') == str_id:
-                stored_pass = row.get('password', '').strip()
-                if not stored_pass:
-                    stored_pass = f"cpe-{clean_student_number(row.get('student_number', ''))}"
-                
-                if stored_pass == old_password.strip():
-                    row['password'] = new_password.strip()
-                    updated = True
-                else:
-                    error_msg = "Invalid current password provided."
-            rows.append(row)
-
-    if updated:
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+    success, response_msg = process_interactive_change(interaction.user.id, old_password, new_password)
+    if success:
         await interaction.followup.send("✅ Password updated successfully! Dummy accounts can now use this credential.", ephemeral=True)
     else:
-        await interaction.followup.send(f"❌ Update rejected: {error_msg}", ephemeral=True)
+        await interaction.followup.send(f"❌ Update rejected: {response_msg}", ephemeral=True)
 
 @bot.tree.command(name="reset_password", description="Admin exclusive tool to manually override profile credentials.")
 @app_commands.describe(student_number="Target student number", new_password="New password string")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset_password(interaction: discord.Interaction, student_number: str, new_password: str):
     await interaction.response.defer(ephemeral=True)
-    if not os.path.exists(CSV_FILE):
-        await interaction.followup.send("❌ File structural layer absent.", ephemeral=True)
+    user_five_digit = clean_student_number(student_number)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    cur.execute("SELECT student_number FROM students WHERE student_number = %s OR student_number LIKE %s", 
+                (student_number.strip(), f"%{user_five_digit}%"))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        await interaction.followup.send("❌ Student number not found.", ephemeral=True)
         return
         
-    rows = []
-    found = False
-    with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames)
-        for row in reader:
-            if row.get('student_number', '').strip() == student_number.strip():
-                row['password'] = new_password.strip()
-                found = True
-            rows.append(row)
-            
-    if found:
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-        await interaction.followup.send(f"✅ Password for `{student_number}` has been manually changed to `{new_password}`.", ephemeral=True)
-    else:
-        await interaction.followup.send("❌ Student number not found.", ephemeral=True)
+    cur.execute("UPDATE students SET password = %s WHERE student_number = %s", (new_password.strip(), row['student_number']))
+    conn.commit()
+    cur.close()
+    conn.close()
+    await interaction.followup.send(f"✅ Password for `{row['student_number']}` has been manually overridden.", ephemeral=True)
 
 # --- ADMIN SETUP UTILITIES --- 
 @bot.command() 
 @commands.has_permissions(administrator=True) 
 async def setup_panel(ctx): 
-    """Admin tool to deploy the main ticket interface panel cleanly"""
     permissions = ctx.channel.permissions_for(ctx.guild.me)
     if not permissions.send_messages or not permissions.embed_links:
-        try:
-            await ctx.author.send(f"❌ Error: I am missing **Send Messages** or **Embed Links** permissions in {ctx.channel.mention}.")
-        except discord.Forbidden:
-            pass
+        try: await ctx.author.send(f"❌ Error: Missing standard app permissions.")
+        except discord.Forbidden: pass
         return
 
     embed = discord.Embed( 
@@ -686,12 +611,9 @@ async def setup_panel(ctx):
         embed.set_footer(text="Powered by Bantay Salakay", icon_url=bot.user.display_avatar.url)
 
     await ctx.send(embed=embed, view=PersistentPanel()) 
-
     if permissions.manage_messages:
-        try: 
-            await ctx.message.delete() 
-        except discord.DiscordException: 
-            pass
+        try: await ctx.message.delete() 
+        except discord.DiscordException: pass
 
 @bot.event 
 async def on_ready(): 

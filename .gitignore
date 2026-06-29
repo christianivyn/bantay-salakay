@@ -3,3 +3,6 @@ students.csv
 *.xlsx
 __pycache__/
 students copy.csv
+bantaysalakay_original.py
+bantaysalakay.py
+migrate_to_sql.py
